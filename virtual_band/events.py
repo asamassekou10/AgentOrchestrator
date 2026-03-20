@@ -58,12 +58,15 @@ class EventBus:
     def __init__(self) -> None:
         self._subscribers: dict[str, list[Subscriber]] = {}
         self._history: list[MusicalEvent] = []
+        self._band_state = None  # set externally to avoid circular import
 
     def subscribe(self, agent_name: str, callback: Subscriber) -> None:
         self._subscribers.setdefault(agent_name, []).append(callback)
 
     async def publish(self, event: MusicalEvent) -> None:
         self._history.append(event)
+        if self._band_state is not None:
+            self._band_state.update(event)
         logger.debug("EventBus: %s", event)
         tasks = []
         for name, callbacks in self._subscribers.items():

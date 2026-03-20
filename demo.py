@@ -11,6 +11,8 @@ from virtual_band import (
     Pianist,
     Vocalist,
     BandOrchestrator,
+    LockIn,
+    CallAndResponse,
 )
 from virtual_band.orchestrator import SongStructure
 
@@ -56,7 +58,11 @@ async def main():
     ]
 
     song = SongStructure.default()
-    orchestra = BandOrchestrator(bus, agents, song)
+    interactions = [
+        LockIn(["Bassist", "Drummer"]),
+        CallAndResponse("Vocalist", "Pianist", phrase_length=2),
+    ]
+    orchestra = BandOrchestrator(bus, agents, song, interactions=interactions)
 
     history = await orchestra.perform()
     print_performance(history)
