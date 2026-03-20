@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Virtual Band</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- ── Top bar ─────────────────────────────────────────────── -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="logo">Virtual Band</span>
+      <span class="badge">Multi-Agent System</span>
+    </div>
+    <div class="topbar-center" id="transport">
+      <button class="btn btn-primary" id="btn-play" title="Start Performance">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,1 13,8 3,15"/></svg>
+        <span>Play</span>
+      </button>
+      <button class="btn btn-ghost" id="btn-stop" disabled title="Stop">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="2" width="12" height="12" rx="1.5"/></svg>
+        <span>Stop</span>
+      </button>
+      <div class="transport-info">
+        <div class="tempo-control">
+          <label for="tempo">BPM</label>
+          <input type="number" id="tempo" value="120" min="40" max="240" step="1">
+        </div>
+        <div class="position" id="position">
+          <span class="pos-bar">Bar <strong id="bar-num">1</strong></span>
+          <span class="pos-beat">Beat <strong id="beat-num">1</strong></span>
+        </div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="tick-counter" id="tick-counter">0 / 0</span>
+    </div>
+  </header>
+
+  <!-- ── Main layout ─────────────────────────────────────────── -->
+  <main class="layout">
+
+    <!-- Left sidebar: Agent panels -->
+    <aside class="sidebar">
+      <div class="agent-panel" data-agent="Drummer">
+        <div class="agent-header">
+          <div class="agent-dot drummer-dot"></div>
+          <span class="agent-name">Drummer</span>
+          <span class="agent-status" id="status-Drummer">idle</span>
+        </div>
+        <div class="agent-viz" id="viz-Drummer">
+          <canvas id="canvas-Drummer" width="240" height="60"></canvas>
+        </div>
+        <div class="agent-stats">
+          <span id="notes-Drummer">0 notes</span>
+          <span id="vel-Drummer">vel: --</span>
+        </div>
+      </div>
+
+      <div class="agent-panel" data-agent="Bassist">
+        <div class="agent-header">
+          <div class="agent-dot bassist-dot"></div>
+          <span class="agent-name">Bassist</span>
+          <span class="agent-status" id="status-Bassist">idle</span>
+        </div>
+        <div class="agent-viz" id="viz-Bassist">
+          <canvas id="canvas-Bassist" width="240" height="60"></canvas>
+        </div>
+        <div class="agent-stats">
+          <span id="notes-Bassist">0 notes</span>
+          <span id="vel-Bassist">vel: --</span>
+        </div>
+      </div>
+
+      <div class="agent-panel" data-agent="Pianist">
+        <div class="agent-header">
+          <div class="agent-dot pianist-dot"></div>
+          <span class="agent-name">Pianist</span>
+          <span class="agent-status" id="status-Pianist">idle</span>
+        </div>
+        <div class="agent-viz" id="viz-Pianist">
+          <canvas id="canvas-Pianist" width="240" height="60"></canvas>
+        </div>
+        <div class="agent-stats">
+          <span id="notes-Pianist">0 notes</span>
+          <span id="vel-Pianist">vel: --</span>
+        </div>
+      </div>
+
+      <div class="agent-panel" data-agent="Vocalist">
+        <div class="agent-header">
+          <div class="agent-dot vocalist-dot"></div>
+          <span class="agent-name">Vocalist</span>
+          <span class="agent-status" id="status-Vocalist">idle</span>
+        </div>
+        <div class="agent-viz" id="viz-Vocalist">
+          <canvas id="canvas-Vocalist" width="240" height="60"></canvas>
+        </div>
+        <div class="agent-stats">
+          <span id="notes-Vocalist">0 notes</span>
+          <span id="vel-Vocalist">vel: --</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Center: Piano roll + timeline -->
+    <section class="center">
+      <!-- Section / chord strip -->
+      <div class="section-strip" id="section-strip"></div>
+
+      <!-- Piano roll canvas -->
+      <div class="pianoroll-wrap">
+        <canvas id="pianoroll" width="900" height="400"></canvas>
+        <div class="playhead" id="playhead"></div>
+      </div>
+
+      <!-- Intensity curve -->
+      <div class="intensity-strip">
+        <canvas id="intensity-canvas" width="900" height="50"></canvas>
+      </div>
+    </section>
+
+    <!-- Right sidebar: Metrics -->
+    <aside class="metrics-sidebar">
+      <h3 class="metrics-title">Performance</h3>
+
+      <div class="metric-card">
+        <span class="metric-label">Section</span>
+        <span class="metric-value" id="metric-section">--</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Chord</span>
+        <span class="metric-value" id="metric-chord">--</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Intensity</span>
+        <div class="meter">
+          <div class="meter-fill" id="meter-intensity" style="width: 0%"></div>
+        </div>
+        <span class="metric-value metric-small" id="metric-intensity-val">0</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Density</span>
+        <div class="meter">
+          <div class="meter-fill meter-density" id="meter-density" style="width: 0%"></div>
+        </div>
+        <span class="metric-value metric-small" id="metric-density-val">0</span>
+      </div>
+
+      <hr class="divider">
+
+      <h3 class="metrics-title">Totals</h3>
+      <div class="metric-card">
+        <span class="metric-label">Events</span>
+        <span class="metric-value" id="metric-total-events">0</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Notes</span>
+        <span class="metric-value" id="metric-total-notes">0</span>
+      </div>
+
+      <hr class="divider">
+
+      <!-- Event log -->
+      <h3 class="metrics-title">Event Log</h3>
+      <div class="event-log" id="event-log"></div>
+    </aside>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
