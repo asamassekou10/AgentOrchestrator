@@ -21,11 +21,14 @@ let isPlaying = false;
 let totalTicks = 0;
 let currentTick = -1;
 let songParts = [];
-let allEvents = [];     // [{tick, type, source, pitch, velocity, duration, chord, section, meta}]
+let allEvents = [];
 let agentNotes = { Drummer: 0, Bassist: 0, Pianist: 0, Vocalist: 0 };
 let totalNotes = 0;
 let intensityByTick = {};
 let densityByTick = {};
+let currentPerformanceId = null;
+let currentTempo = 120;
+let llmAvailable = false;
 
 /* Per-agent rolling waveform buffers (last 60 velocity values) */
 const WAVE_LEN = 60;
@@ -33,6 +36,13 @@ let agentWaves = {};
 for (const a of Object.keys(AGENT_COLORS)) {
   if (a !== "Orchestrator") agentWaves[a] = new Array(WAVE_LEN).fill(0);
 }
+
+/* Audio state */
+let audioEnabled = false;
+
+/* Reconnection state */
+let reconnectAttempts = 0;
+const MAX_RECONNECT = 3;
 
 /* ── DOM refs ────────────────────────────────────────────────── */
 const $ = (sel) => document.querySelector(sel);
@@ -89,6 +99,19 @@ async function loadSong() {
   buildSectionStrip();
 }
 
+async function loadConfig() {
+  try {
+    const res = await fetch("/api/config");
+    const data = await res.json();
+    llmAvailable = data.llm_available;
+    if (tempoIn) tempoIn.value = data.default_tempo || 120;
+    const llmToggle = $("#llm-toggle");
+    if (llmToggle) {
+      llmToggle.style.display = llmAvailable ? "flex" : "none";
+    }
+  } catch (e) { /* config endpoint optional */ }
+}
+
 function buildSectionStrip() {
   sectionStrip.innerHTML = "";
   for (const p of songParts) {
@@ -105,18 +128,34 @@ function buildSectionStrip() {
 btnPlay.addEventListener("click", startPerformance);
 btnStop.addEventListener("click", stopPerformance);
 
-function startPerformance() {
+async function startPerformance() {
   if (isPlaying) return;
+
+  // Init audio on first play (requires user gesture)
+  if (!audioEnabled && typeof audioEngine !== "undefined") {
+    await audioEngine.init();
+    audioEnabled = audioEngine.ready;
+  }
+
   resetState();
   isPlaying = true;
+  reconnectAttempts = 0;
   btnPlay.disabled = true;
   btnStop.disabled = false;
 
+  currentTempo = parseInt(tempoIn.value, 10) || 120;
+  const useLLM = $("#llm-checkbox") ? $("#llm-checkbox").checked : false;
+
+  connectWebSocket(currentTempo, useLLM);
+}
+
+function connectWebSocket(tempo, useLLM) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}/ws/perform`);
 
   ws.onopen = () => {
-    ws.send(JSON.stringify({ tempo: parseInt(tempoIn.value, 10) || 120 }));
+    reconnectAttempts = 0;
+    ws.send(JSON.stringify({ tempo, use_llm: useLLM }));
   };
 
   ws.onmessage = (msg) => {
@@ -127,7 +166,9 @@ function startPerformance() {
     } else if (data.kind === "tick") {
       handleTick(data);
     } else if (data.kind === "done") {
+      currentPerformanceId = data.performance_id;
       $("#metric-total-events").textContent = data.total_events;
+      updateExportButtons();
       finishPerformance();
     } else if (data.kind === "error") {
       console.error("Server error:", data.message);
@@ -135,11 +176,23 @@ function startPerformance() {
     }
   };
 
-  ws.onclose = () => finishPerformance();
-  ws.onerror = () => finishPerformance();
+  ws.onclose = () => {
+    if (isPlaying && reconnectAttempts < MAX_RECONNECT) {
+      reconnectAttempts++;
+      console.log(`Reconnecting... attempt ${reconnectAttempts}`);
+      setTimeout(() => connectWebSocket(tempo, useLLM), 1000);
+    } else {
+      finishPerformance();
+    }
+  };
+
+  ws.onerror = () => {
+    // onclose will handle reconnection
+  };
 }
 
 function stopPerformance() {
+  reconnectAttempts = MAX_RECONNECT; // prevent reconnect
   if (ws) { ws.close(); ws = null; }
   finishPerformance();
 }
@@ -159,6 +212,7 @@ function resetState() {
   agentNotes = { Drummer: 0, Bassist: 0, Pianist: 0, Vocalist: 0 };
   totalNotes = 0;
   currentTick = -1;
+  currentPerformanceId = null;
   intensityByTick = {};
   densityByTick = {};
   for (const a in agentWaves) agentWaves[a].fill(0);
@@ -175,6 +229,7 @@ function resetState() {
     $(`#notes-${a}`).textContent = "0 notes";
     $(`#vel-${a}`).textContent = "vel: --";
   }
+  updateExportButtons();
 }
 
 /* ── Tick handler ────────────────────────────────────────────── */
@@ -215,6 +270,11 @@ function handleTick(data) {
       if (agentWaves[ev.source]) {
         agentWaves[ev.source].push(ev.velocity);
         if (agentWaves[ev.source].length > WAVE_LEN) agentWaves[ev.source].shift();
+      }
+
+      // Play audio
+      if (audioEnabled && typeof audioEngine !== "undefined") {
+        audioEngine.playNote(ev.source, ev.pitch, ev.velocity, ev.duration || 1, currentTempo);
       }
     }
 
@@ -276,7 +336,6 @@ function handleTick(data) {
 
 /* ── Section highlight ───────────────────────────────────────── */
 function highlightSection(section) {
-  // find which block spans the current tick
   let cursor = 0;
   const blocks = sectionStrip.children;
   for (let i = 0; i < songParts.length; i++) {
@@ -293,6 +352,268 @@ function setAgentStatus(name, status) {
   const el = $(`#status-${name}`);
   el.textContent = status;
   el.className = "agent-status " + status;
+}
+
+/* ── Mute / Solo / Volume controls ───────────────────────────── */
+function toggleMute(agent) {
+  const btn = $(`#mute-${agent}`);
+  const isMuted = btn.classList.toggle("active");
+  if (typeof audioEngine !== "undefined" && audioEngine.ready) {
+    audioEngine.setMute(agent, isMuted);
+  }
+  // Visual: dim the agent panel
+  const panel = $(`.agent-panel[data-agent="${agent}"]`);
+  panel.classList.toggle("muted", isMuted);
+}
+
+function toggleSolo(agent) {
+  const btn = $(`#solo-${agent}`);
+  const wasSolo = btn.classList.contains("active");
+
+  // Clear all solo buttons
+  for (const a of ["Drummer","Bassist","Pianist","Vocalist"]) {
+    $(`#solo-${a}`).classList.remove("active");
+    $(`.agent-panel[data-agent="${a}"]`).classList.remove("soloed-out");
+  }
+
+  if (wasSolo) {
+    // Unsolo
+    if (typeof audioEngine !== "undefined" && audioEngine.ready) {
+      audioEngine.setSolo(null);
+    }
+  } else {
+    // Solo this agent
+    btn.classList.add("active");
+    if (typeof audioEngine !== "undefined" && audioEngine.ready) {
+      audioEngine.setSolo(agent);
+    }
+    // Dim other panels
+    for (const a of ["Drummer","Bassist","Pianist","Vocalist"]) {
+      if (a !== agent) {
+        $(`.agent-panel[data-agent="${a}"]`).classList.add("soloed-out");
+      }
+    }
+  }
+}
+
+function setAgentVolume(agent, value) {
+  // value is 0-100, map to dB (-40 to 0)
+  const db = value === 0 ? -60 : -40 + (value / 100) * 40;
+  if (typeof audioEngine !== "undefined" && audioEngine.ready) {
+    audioEngine.setAgentVolume(agent, db);
+  }
+}
+
+function setMasterVolume(value) {
+  const db = value === 0 ? -60 : -40 + (value / 100) * 40;
+  if (typeof audioEngine !== "undefined" && audioEngine.ready) {
+    audioEngine.setMasterVolume(db);
+  }
+}
+
+/* ── Export buttons ──────────────────────────────────────────── */
+function updateExportButtons() {
+  const hasPerf = currentPerformanceId != null;
+  const midiBtn = $("#btn-midi-export");
+  if (midiBtn) midiBtn.disabled = !hasPerf;
+}
+
+function exportMidi() {
+  if (!currentPerformanceId) return;
+  window.open(`/api/performances/${currentPerformanceId}/midi`, "_blank");
+}
+
+/* ── Performance history ─────────────────────────────────────── */
+async function loadPerformanceHistory() {
+  try {
+    const res = await fetch("/api/performances");
+    const data = await res.json();
+    const list = $("#performance-list");
+    if (!list) return;
+    list.innerHTML = "";
+    for (const p of data.performances) {
+      const el = document.createElement("div");
+      el.className = "perf-item";
+      el.innerHTML = `<span>${p.name}</span><span class="perf-events">${p.total_events} events</span>`;
+      el.addEventListener("click", () => replayPerformance(p.id));
+      list.appendChild(el);
+    }
+  } catch (e) { /* performances endpoint optional */ }
+}
+
+async function replayPerformance(perfId) {
+  if (isPlaying) return;
+
+  // Init audio on first replay
+  if (!audioEnabled && typeof audioEngine !== "undefined") {
+    await audioEngine.init();
+    audioEnabled = audioEngine.ready;
+  }
+
+  try {
+    const res = await fetch(`/api/performances/${perfId}`);
+    const perf = await res.json();
+    if (perf.error) return;
+
+    resetState();
+    isPlaying = true;
+    btnPlay.disabled = true;
+    btnStop.disabled = false;
+
+    currentTempo = perf.tempo || 120;
+    totalTicks = perf.total_ticks;
+    currentPerformanceId = perf.id;
+    tickCtr.textContent = `0 / ${totalTicks}`;
+
+    // Group events by tick
+    const eventsByTick = {};
+    for (const ev of perf.events) {
+      const t = ev.tick;
+      if (!eventsByTick[t]) eventsByTick[t] = [];
+      eventsByTick[t].push(ev);
+    }
+
+    // Replay tick-by-tick
+    for (let tick = 0; tick < totalTicks; tick++) {
+      if (!isPlaying) break;
+      const tickEvents = eventsByTick[tick] || [];
+      handleTick({ tick, events: tickEvents });
+      await new Promise(r => setTimeout(r, 60000 / currentTempo / 4));
+    }
+
+    updateExportButtons();
+    finishPerformance();
+  } catch (e) {
+    console.error("Replay error:", e);
+    finishPerformance();
+  }
+}
+
+/* ── Song authoring ──────────────────────────────────────────── */
+const SECTIONS = ["intro", "verse", "chorus", "bridge", "outro"];
+const CHORDS = [
+  "C", "Cm", "Cmaj7", "Cm7", "D", "Dm", "Dmaj7", "Dm7",
+  "E", "Em", "F", "Fm", "Fmaj7", "Fm7", "G", "Gm", "Gmaj7", "Gm7",
+  "A", "Am", "Amaj7", "Am7", "B", "Bm",
+];
+
+let editingSong = [];
+
+function openSongEditor() {
+  const modal = $("#song-editor-modal");
+  if (!modal) return;
+  // Pre-populate with current song parts
+  editingSong = songParts.map(p => ({ ...p }));
+  renderSongEditor();
+  modal.classList.add("visible");
+}
+
+function closeSongEditor() {
+  const modal = $("#song-editor-modal");
+  if (modal) modal.classList.remove("visible");
+}
+
+function renderSongEditor() {
+  const container = $("#song-parts-editor");
+  if (!container) return;
+  container.innerHTML = "";
+
+  editingSong.forEach((part, idx) => {
+    const row = document.createElement("div");
+    row.className = "song-part-row";
+    row.innerHTML = `
+      <select class="se-section" data-idx="${idx}">
+        ${SECTIONS.map(s => `<option value="${s}" ${s === part.section ? "selected" : ""}>${s}</option>`).join("")}
+      </select>
+      <select class="se-chord" data-idx="${idx}">
+        ${CHORDS.map(c => `<option value="${c}" ${c === part.chord ? "selected" : ""}>${c}</option>`).join("")}
+      </select>
+      <input type="number" class="se-duration" data-idx="${idx}" value="${part.duration}" min="1" max="64" title="Duration (ticks)">
+      <input type="range" class="se-intensity" data-idx="${idx}" value="${part.intensity}" min="0" max="127" title="Intensity">
+      <span class="se-intensity-val">${part.intensity}</span>
+      <button class="btn-icon se-remove" data-idx="${idx}" title="Remove">&times;</button>
+    `;
+    container.appendChild(row);
+  });
+
+  // Wire events
+  container.querySelectorAll(".se-section").forEach(el => {
+    el.addEventListener("change", e => { editingSong[+e.target.dataset.idx].section = e.target.value; });
+  });
+  container.querySelectorAll(".se-chord").forEach(el => {
+    el.addEventListener("change", e => { editingSong[+e.target.dataset.idx].chord = e.target.value; });
+  });
+  container.querySelectorAll(".se-duration").forEach(el => {
+    el.addEventListener("change", e => { editingSong[+e.target.dataset.idx].duration = parseInt(e.target.value) || 4; });
+  });
+  container.querySelectorAll(".se-intensity").forEach(el => {
+    el.addEventListener("input", e => {
+      const idx = +e.target.dataset.idx;
+      editingSong[idx].intensity = parseInt(e.target.value);
+      e.target.nextElementSibling.textContent = e.target.value;
+    });
+  });
+  container.querySelectorAll(".se-remove").forEach(el => {
+    el.addEventListener("click", e => {
+      editingSong.splice(+e.target.dataset.idx, 1);
+      renderSongEditor();
+    });
+  });
+}
+
+function addSongPart() {
+  editingSong.push({ section: "verse", chord: "C", duration: 8, intensity: 80 });
+  renderSongEditor();
+}
+
+function applySongEdit() {
+  if (editingSong.length === 0) return;
+  songParts = editingSong.map(p => ({ ...p }));
+  totalTicks = songParts.reduce((s, p) => s + p.duration, 0);
+  buildSectionStrip();
+  closeSongEditor();
+}
+
+async function saveSongToServer() {
+  const nameInput = $("#song-name-input");
+  const name = nameInput ? nameInput.value.trim() : "";
+  if (!name) { alert("Enter a song name"); return; }
+  try {
+    await fetch("/api/songs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, parts: editingSong }),
+    });
+    await loadSavedSongs();
+  } catch (e) { console.error(e); }
+}
+
+async function loadSavedSongs() {
+  try {
+    const res = await fetch("/api/songs");
+    const data = await res.json();
+    const list = $("#saved-songs-list");
+    if (!list) return;
+    list.innerHTML = "";
+    for (const name of data.songs) {
+      const el = document.createElement("div");
+      el.className = "saved-song-item";
+      el.textContent = name;
+      el.addEventListener("click", () => loadSongByName(name));
+      list.appendChild(el);
+    }
+  } catch (e) { /* optional */ }
+}
+
+async function loadSongByName(name) {
+  try {
+    const res = await fetch(`/api/songs/${encodeURIComponent(name)}`);
+    const data = await res.json();
+    if (data.parts) {
+      editingSong = data.parts;
+      renderSongEditor();
+    }
+  } catch (e) { console.error(e); }
 }
 
 /* ── Event log ───────────────────────────────────────────────── */
@@ -326,7 +647,7 @@ function updatePlayhead() {
   playhead.style.left = (pct * wrap.clientWidth) + "px";
 }
 
-/* ── Piano roll drawing ──────────────────────────────────────── */
+/* ── Piano roll drawing (improved with note labels and velocity shading) ── */
 function drawPianoRoll() {
   const canvas = pianoCanvas;
   const ctx = canvas.getContext("2d");
@@ -342,29 +663,33 @@ function drawPianoRoll() {
   const rowH = h / PITCH_RANGE;
 
   // Grid lines (every 4 ticks = bar line)
-  ctx.strokeStyle = "rgba(42,45,62,.6)";
   ctx.lineWidth = 1;
   for (let t = 0; t <= totalTicks; t += 4) {
     const x = Math.round(t * colW);
+    ctx.strokeStyle = t % 16 === 0 ? "rgba(42,45,62,.8)" : "rgba(42,45,62,.4)";
     ctx.beginPath();
     ctx.moveTo(x, 0);
     ctx.lineTo(x, h);
     ctx.stroke();
   }
 
-  // Horizontal pitch guides (every octave)
-  ctx.strokeStyle = "rgba(42,45,62,.35)";
+  // Horizontal pitch guides (every octave) with labels
+  ctx.font = `${9 * pr}px monospace`;
   for (let p = PITCH_MIN; p <= PITCH_MAX; p++) {
     if (p % 12 === 0) {
       const y = h - ((p - PITCH_MIN) / PITCH_RANGE) * h;
+      ctx.strokeStyle = "rgba(42,45,62,.35)";
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(w, y);
       ctx.stroke();
+      // Octave label
+      ctx.fillStyle = "rgba(136,146,168,.5)";
+      ctx.fillText(`C${Math.floor(p / 12) - 1}`, 3 * pr, y - 2 * pr);
     }
   }
 
-  // Draw notes
+  // Draw notes with rounded rects and glow effect
   for (const ev of allEvents) {
     if (ev.type !== "note_on" || ev.pitch == null) continue;
     if (ev.source === "Orchestrator") continue;
@@ -378,13 +703,34 @@ function drawPianoRoll() {
     // Velocity → alpha
     const alpha = 0.35 + (ev.velocity / 127) * 0.65;
 
+    // Glow for high-velocity notes
+    if (ev.velocity > 100) {
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 4 * pr;
+    }
+
     ctx.fillStyle = color;
     ctx.globalAlpha = alpha;
     ctx.beginPath();
     ctx.roundRect(x + 0.5, y + 0.5, noteW - 1, noteH - 1, 1.5 * pr);
     ctx.fill();
+
+    ctx.shadowBlur = 0;
   }
   ctx.globalAlpha = 1;
+
+  // Playback cursor line
+  if (currentTick >= 0) {
+    const cx = (currentTick + 0.5) * colW;
+    ctx.strokeStyle = "rgba(99,102,241,.4)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4 * pr, 4 * pr]);
+    ctx.beginPath();
+    ctx.moveTo(cx, 0);
+    ctx.lineTo(cx, h);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 }
 
 /* ── Intensity curve ─────────────────────────────────────────── */
@@ -499,7 +845,36 @@ function drawAgentWaveforms() {
 
 /* ── Init ────────────────────────────────────────────────────── */
 (async function init() {
+  await loadConfig();
   await loadSong();
   resizeCanvases();
   render();
+  loadPerformanceHistory();
+  loadSavedSongs();
+
+  // Wire song editor buttons
+  const btnEditSong = $("#btn-edit-song");
+  if (btnEditSong) btnEditSong.addEventListener("click", openSongEditor);
+  const btnCloseSE = $("#btn-close-song-editor");
+  if (btnCloseSE) btnCloseSE.addEventListener("click", closeSongEditor);
+  const btnAddPart = $("#btn-add-part");
+  if (btnAddPart) btnAddPart.addEventListener("click", addSongPart);
+  const btnApplySong = $("#btn-apply-song");
+  if (btnApplySong) btnApplySong.addEventListener("click", applySongEdit);
+  const btnSaveSong = $("#btn-save-song");
+  if (btnSaveSong) btnSaveSong.addEventListener("click", saveSongToServer);
+  const btnExportMidi = $("#btn-midi-export");
+  if (btnExportMidi) btnExportMidi.addEventListener("click", exportMidi);
+  const masterVol = $("#master-volume");
+  if (masterVol) masterVol.addEventListener("input", e => setMasterVolume(+e.target.value));
+
+  // Wire per-agent controls
+  for (const a of ["Drummer","Bassist","Pianist","Vocalist"]) {
+    const muteBtn = $(`#mute-${a}`);
+    if (muteBtn) muteBtn.addEventListener("click", () => toggleMute(a));
+    const soloBtn = $(`#solo-${a}`);
+    if (soloBtn) soloBtn.addEventListener("click", () => toggleSolo(a));
+    const volSlider = $(`#vol-${a}`);
+    if (volSlider) volSlider.addEventListener("input", e => setAgentVolume(a, +e.target.value));
+  }
 })();

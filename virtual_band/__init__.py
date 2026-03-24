@@ -11,7 +11,10 @@ from virtual_band.agents import (
     DropOut,
     CallAndResponse,
 )
-from virtual_band.orchestrator import BandOrchestrator
+from virtual_band.orchestrator import BandOrchestrator, SongStructure
+from virtual_band.config import BandConfig, AudioConfig, LLMConfig, ServerConfig
+from virtual_band.songs import Song, SongStore
+from virtual_band.llm_agent import LLMAgent, create_llm_agents
 
 __all__ = [
     "MusicalEvent",
@@ -27,4 +30,13 @@ __all__ = [
     "DropOut",
     "CallAndResponse",
     "BandOrchestrator",
+    "SongStructure",
+    "BandConfig",
+    "AudioConfig",
+    "LLMConfig",
+    "ServerConfig",
+    "Song",
+    "SongStore",
+    "LLMAgent",
+    "create_llm_agents",
 ]

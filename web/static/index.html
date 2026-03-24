@@ -32,8 +32,29 @@
           <span class="pos-beat">Beat <strong id="beat-num">1</strong></span>
         </div>
       </div>
+      <!-- LLM toggle -->
+      <div class="llm-toggle" id="llm-toggle" style="display:none">
+        <label class="toggle-label" for="llm-checkbox">
+          <input type="checkbox" id="llm-checkbox">
+          <span>AI Mode</span>
+        </label>
+      </div>
+      <!-- Song editor trigger -->
+      <button class="btn btn-ghost" id="btn-edit-song" title="Edit Song">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M12.1 1.3a1 1 0 011.4 0l1.2 1.2a1 1 0 010 1.4L5.9 12.7l-3 .8.8-3L12.1 1.3z"/></svg>
+        <span>Song</span>
+      </button>
+      <!-- MIDI export -->
+      <button class="btn btn-ghost" id="btn-midi-export" disabled title="Export MIDI">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1v9m0 0l-3-3m3 3l3-3M2 12v2h12v-2"/></svg>
+        <span>MIDI</span>
+      </button>
     </div>
     <div class="topbar-right">
+      <div class="master-vol">
+        <label for="master-volume">Vol</label>
+        <input type="range" id="master-volume" value="75" min="0" max="100">
+      </div>
       <span class="tick-counter" id="tick-counter">0 / 0</span>
     </div>
   </header>
@@ -48,6 +69,11 @@
           <div class="agent-dot drummer-dot"></div>
           <span class="agent-name">Drummer</span>
           <span class="agent-status" id="status-Drummer">idle</span>
+        </div>
+        <div class="agent-controls">
+          <button class="btn-ctrl btn-mute" id="mute-Drummer" title="Mute">M</button>
+          <button class="btn-ctrl btn-solo" id="solo-Drummer" title="Solo">S</button>
+          <input type="range" class="vol-slider" id="vol-Drummer" value="75" min="0" max="100" title="Volume">
         </div>
         <div class="agent-viz" id="viz-Drummer">
           <canvas id="canvas-Drummer" width="240" height="60"></canvas>
@@ -64,6 +90,11 @@
           <span class="agent-name">Bassist</span>
           <span class="agent-status" id="status-Bassist">idle</span>
         </div>
+        <div class="agent-controls">
+          <button class="btn-ctrl btn-mute" id="mute-Bassist" title="Mute">M</button>
+          <button class="btn-ctrl btn-solo" id="solo-Bassist" title="Solo">S</button>
+          <input type="range" class="vol-slider" id="vol-Bassist" value="75" min="0" max="100" title="Volume">
+        </div>
         <div class="agent-viz" id="viz-Bassist">
           <canvas id="canvas-Bassist" width="240" height="60"></canvas>
         </div>
@@ -79,6 +110,11 @@
           <span class="agent-name">Pianist</span>
           <span class="agent-status" id="status-Pianist">idle</span>
         </div>
+        <div class="agent-controls">
+          <button class="btn-ctrl btn-mute" id="mute-Pianist" title="Mute">M</button>
+          <button class="btn-ctrl btn-solo" id="solo-Pianist" title="Solo">S</button>
+          <input type="range" class="vol-slider" id="vol-Pianist" value="75" min="0" max="100" title="Volume">
+        </div>
         <div class="agent-viz" id="viz-Pianist">
           <canvas id="canvas-Pianist" width="240" height="60"></canvas>
         </div>
@@ -93,6 +129,11 @@
           <div class="agent-dot vocalist-dot"></div>
           <span class="agent-name">Vocalist</span>
           <span class="agent-status" id="status-Vocalist">idle</span>
+        </div>
+        <div class="agent-controls">
+          <button class="btn-ctrl btn-mute" id="mute-Vocalist" title="Mute">M</button>
+          <button class="btn-ctrl btn-solo" id="solo-Vocalist" title="Solo">S</button>
+          <input type="range" class="vol-slider" id="vol-Vocalist" value="75" min="0" max="100" title="Volume">
         </div>
         <div class="agent-viz" id="viz-Vocalist">
           <canvas id="canvas-Vocalist" width="240" height="60"></canvas>
@@ -162,12 +203,51 @@
 
       <hr class="divider">
 
+      <!-- Performance history -->
+      <h3 class="metrics-title">History</h3>
+      <div class="performance-list" id="performance-list"></div>
+
+      <hr class="divider">
+
       <!-- Event log -->
       <h3 class="metrics-title">Event Log</h3>
       <div class="event-log" id="event-log"></div>
     </aside>
   </main>
 
+  <!-- ── Song Editor Modal ───────────────────────────────────── -->
+  <div class="modal-overlay" id="song-editor-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Song Editor</h2>
+        <button class="btn-icon" id="btn-close-song-editor">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="song-editor-toolbar">
+          <button class="btn btn-primary btn-sm" id="btn-add-part">+ Add Part</button>
+          <div class="song-save-group">
+            <input type="text" id="song-name-input" placeholder="Song name..." class="input-sm">
+            <button class="btn btn-ghost btn-sm" id="btn-save-song">Save</button>
+          </div>
+        </div>
+        <div class="song-editor-labels">
+          <span>Section</span><span>Chord</span><span>Duration</span><span>Intensity</span><span></span><span></span>
+        </div>
+        <div class="song-parts-editor" id="song-parts-editor"></div>
+        <div class="saved-songs">
+          <h4>Saved Songs</h4>
+          <div id="saved-songs-list"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" id="btn-apply-song">Apply & Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tone.js CDN (loaded before audio.js) -->
+  <script src="https://cdn.jsdelivr.net/npm/tone@15/build/Tone.min.js"></script>
+  <script src="/static/audio.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

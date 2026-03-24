@@ -77,34 +77,60 @@ class MusicianAgent(ABC):
         return MusicalEvent(source=self.name, tick=tick, **kwargs)
 
 
+# ── Swing utility ──────────────────────────────────────────────────────
+
+def swing_velocity(tick: int, base_vel: int, swing_amount: int = 15) -> int:
+    """Apply swing feel: emphasize on-beats (0, 2), softer off-beats (1, 3)."""
+    beat = tick % 4
+    if beat in (0, 2):
+        return min(127, base_vel + swing_amount)
+    else:
+        return max(20, base_vel - swing_amount)
+
+
+def humanize_velocity(vel: int, amount: int = 8) -> int:
+    """Add slight random variation to velocity for human feel."""
+    return max(20, min(127, vel + random.randint(-amount, amount)))
+
+
 # ── Concrete agents ────────────────────────────────────────────────────
 
-# Pitch constants (MIDI)
+# Pitch constants (MIDI) — expanded drum kit
 KICK = 36
 SNARE = 38
 HI_HAT_CLOSED = 42
 HI_HAT_OPEN = 46
+RIDE = 51
+CRASH = 49
+GHOST_SNARE = 38  # same pitch, lower velocity
 
 
 class Drummer(MusicianAgent):
     """Keeps time and drives the groove.
 
-    Uses section-aware patterns and reacts to other agents with fills.
+    Uses section-aware patterns with swing feel, ghost notes, and ride cymbal.
     """
 
-    # Section strategy: hat style, kick pattern beats, snare pattern beats, fill probability
+    # Section strategy: hat style, kick pattern beats, snare pattern beats,
+    #                   fill probability, use_ride, ghost_note_prob
     SECTION_STRATEGIES: dict[str, dict] = {
-        "intro": {"hat": "closed", "kick": (0,), "snare": (2,), "fill_chance": 0.0},
-        "verse": {"hat": "closed", "kick": (0, 2), "snare": (1, 3), "fill_chance": 0.05},
-        "chorus": {"hat": "open_accent", "kick": (0, 1, 2, 3), "snare": (1, 3), "fill_chance": 0.1},
-        "bridge": {"hat": "closed", "kick": (0, 2), "snare": (2,), "fill_chance": 0.15},
-        "outro": {"hat": "closed", "kick": (0,), "snare": (), "fill_chance": 0.0},
+        "intro":  {"hat": "closed", "kick": (0,), "snare": (2,),
+                   "fill_chance": 0.0, "use_ride": False, "ghost_prob": 0.0},
+        "verse":  {"hat": "closed", "kick": (0, 2), "snare": (1, 3),
+                   "fill_chance": 0.05, "use_ride": False, "ghost_prob": 0.2},
+        "chorus": {"hat": "open_accent", "kick": (0, 1, 2, 3), "snare": (1, 3),
+                   "fill_chance": 0.1, "use_ride": True, "ghost_prob": 0.3},
+        "bridge": {"hat": "closed", "kick": (0, 2), "snare": (2,),
+                   "fill_chance": 0.15, "use_ride": True, "ghost_prob": 0.15},
+        "outro":  {"hat": "closed", "kick": (0,), "snare": (),
+                   "fill_chance": 0.0, "use_ride": False, "ghost_prob": 0.0},
     }
 
     def __init__(self, bus: EventBus, name: str = "Drummer", band_state: BandState | None = None) -> None:
         super().__init__(name, bus, band_state)
         self._fill_active: bool = False
         self._prev_intensity: int = 80
+        self._bar_count: int = 0
 
     def _strategy(self) -> dict:
         return self.SECTION_STRATEGIES.get(self.state.current_section, self.SECTION_STRATEGIES["verse"])
@@ -126,6 +152,9 @@ class Drummer(MusicianAgent):
         beat_in_bar = tick % 4
         strat = self._strategy()
 
+        if beat_in_bar == 0:
+            self._bar_count += 1
+
         # Fill: rapid snare + open hi-hat burst, then resume normal
         if self._fill_active:
             self._fill_active = False
@@ -134,31 +163,58 @@ class Drummer(MusicianAgent):
                     tick=tick, event_type=EventType.NOTE_ON,
                     pitch=pitch, velocity=min(127, self.state.intensity + 15), duration=1,
                 ))
+            # Add crash on the downbeat after a fill
+            if beat_in_bar == 0:
+                events.append(self._make_event(
+                    tick=tick, event_type=EventType.NOTE_ON,
+                    pitch=CRASH, velocity=min(127, self.state.intensity + 20), duration=1,
+                ))
             for e in events:
                 await self.emit(e)
             return events
 
-        # Hi-hat on every tick — open accent in chorus on downbeat
-        hat_pitch = HI_HAT_CLOSED
-        if strat["hat"] == "open_accent" and beat_in_bar == 0:
-            hat_pitch = HI_HAT_OPEN
+        # Hi-hat / ride selection with swing
+        if strat["use_ride"]:
+            hat_pitch = RIDE
+        else:
+            hat_pitch = HI_HAT_CLOSED
+            if strat["hat"] == "open_accent" and beat_in_bar == 0:
+                hat_pitch = HI_HAT_OPEN
+
+        hat_vel = swing_velocity(tick, self._hat_velocity(tick), swing_amount=12)
         events.append(self._make_event(
             tick=tick, event_type=EventType.NOTE_ON,
-            pitch=hat_pitch, velocity=self._hat_velocity(tick), duration=1,
+            pitch=hat_pitch, velocity=hat_vel, duration=1,
         ))
 
-        # Kick pattern from strategy
+        # Kick pattern from strategy with humanized velocity
         if beat_in_bar in strat["kick"]:
+            kick_vel = humanize_velocity(min(127, self.state.intensity + 10))
             events.append(self._make_event(
                 tick=tick, event_type=EventType.NOTE_ON,
-                pitch=KICK, velocity=min(127, self.state.intensity + 10), duration=1,
+                pitch=KICK, velocity=kick_vel, duration=1,
             ))
 
         # Snare pattern from strategy
         if beat_in_bar in strat["snare"]:
+            snare_vel = swing_velocity(tick, self.state.intensity, swing_amount=8)
             events.append(self._make_event(
                 tick=tick, event_type=EventType.NOTE_ON,
-                pitch=SNARE, velocity=self.state.intensity, duration=1,
+                pitch=SNARE, velocity=snare_vel, duration=1,
+            ))
+        # Ghost notes on off-beats (soft snare hits for groove)
+        elif strat["ghost_prob"] > 0 and random.random() < strat["ghost_prob"]:
+            ghost_vel = max(20, self.state.intensity // 3)
+            events.append(self._make_event(
+                tick=tick, event_type=EventType.NOTE_ON,
+                pitch=GHOST_SNARE, velocity=ghost_vel, duration=1,
+            ))
+
+        # Crash cymbal on section transitions (first bar, beat 0)
+        if beat_in_bar == 0 and self._bar_count == 1 and self.state.current_section in ("chorus", "bridge"):
+            events.append(self._make_event(
+                tick=tick, event_type=EventType.NOTE_ON,
+                pitch=CRASH, velocity=min(127, self.state.intensity + 15), duration=1,
             ))
 
         for e in events:
@@ -185,25 +241,32 @@ CHORD_ROOTS: dict[str, int] = {
 
 # Section strategies for bass: (play_beats, walk_enabled, velocity_offset)
 BASS_STRATEGIES: dict[str, dict] = {
-    "intro": {"play_beats": (0,), "walk": False, "vel_offset": -10},
-    "verse": {"play_beats": (0, 2), "walk": False, "vel_offset": 0},
+    "intro":  {"play_beats": (0,), "walk": False, "vel_offset": -10},
+    "verse":  {"play_beats": (0, 2), "walk": False, "vel_offset": 0},
     "chorus": {"play_beats": (0, 1, 2, 3), "walk": True, "vel_offset": 5},
     "bridge": {"play_beats": (0, 2), "walk": False, "vel_offset": -5},
-    "outro": {"play_beats": (0, 2), "walk": False, "vel_offset": -15},
+    "outro":  {"play_beats": (0, 2), "walk": False, "vel_offset": -15},
 }
 
 
 class Bassist(MusicianAgent):
-    """Locks in with the drummer and follows the harmony."""
+    """Locks in with the drummer and follows the harmony.
+
+    Now includes chromatic approach notes, walking bass variation,
+    and swing-influenced velocity.
+    """
 
     def __init__(self, bus: EventBus, name: str = "Bassist", band_state: BandState | None = None) -> None:
         super().__init__(name, bus, band_state)
         self._last_root: int = 36  # default C2
+        self._next_root: int | None = None  # for approach notes
         self._drummer_kicked: bool = False  # whether drummer played kick this tick
 
     async def react(self, event: MusicalEvent) -> None:
         if event.event_type == EventType.CHORD_CHANGE and event.chord:
-            self._last_root = CHORD_ROOTS.get(event.chord, self._last_root)
+            new_root = CHORD_ROOTS.get(event.chord, self._last_root)
+            self._next_root = new_root
+            self._last_root = new_root
         # Lock-in: notice when drummer plays a kick
         if event.source == "Drummer" and event.event_type == EventType.NOTE_ON and event.pitch == KICK:
             self._drummer_kicked = True
@@ -224,15 +287,22 @@ class Bassist(MusicianAgent):
         if not should_play:
             return events
 
-        # Pitch selection
+        # Pitch selection with walking bass and approach notes
         if beat_in_bar == 0:
             pitch = self._last_root
         elif beat_in_bar == 2:
             pitch = self._last_root + 7  # perfect fifth
-        elif strat["walk"] and beat_in_bar == 3 and self.state.intensity > 70:
-            pitch = self._last_root + random.choice([5, 7, 10])
+        elif strat["walk"] and beat_in_bar == 3:
+            # Chromatic approach note: one semitone below the next root
+            if self._next_root and self.state.intensity > 60:
+                pitch = self._next_root - 1  # chromatic approach from below
+            elif self.state.intensity > 70:
+                pitch = self._last_root + random.choice([3, 5, 7, 10])
+            else:
+                pitch = self._last_root + random.choice([5, 7])
         elif beat_in_bar == 1 and strat["play_beats"] == (0, 1, 2, 3):
-            pitch = self._last_root + 5  # fourth on beat 1 in chorus
+            # Walking: third or fourth on beat 1
+            pitch = self._last_root + random.choice([3, 4, 5])
         else:
             pitch = self._last_root
 
@@ -241,6 +311,8 @@ class Bassist(MusicianAgent):
             return events
 
         vel = max(30, min(127, self.state.intensity + strat["vel_offset"]))
+        vel = swing_velocity(tick, vel, swing_amount=10)
+        vel = humanize_velocity(vel, amount=5)
         events.append(self._make_event(
             tick=tick, event_type=EventType.NOTE_ON,
             pitch=pitch, velocity=vel, duration=1,
@@ -253,39 +325,66 @@ class Bassist(MusicianAgent):
 
 # ── Piano / Keys ────────────────────────────────────────────────────────
 
+# Extended voicings with 7ths and rootless voicings
 CHORD_VOICINGS: dict[str, tuple[int, ...]] = {
-    "C": (48, 52, 55), "Cm": (48, 51, 55),
-    "Cmaj7": (48, 52, 55, 59), "Cm7": (48, 51, 55, 58),
-    "D": (50, 54, 57), "Dm": (50, 53, 57),
-    "Dmaj7": (50, 54, 57, 61), "Dm7": (50, 53, 57, 60),
-    "E": (52, 56, 59), "Em": (52, 55, 59),
-    "F": (53, 57, 60), "Fm": (53, 56, 60),
-    "G": (55, 59, 62), "Gm": (55, 58, 62),
-    "A": (57, 61, 64), "Am": (57, 60, 64),
-    "B": (59, 63, 66), "Bm": (59, 62, 66),
+    "C":     (48, 52, 55),       "Cm":    (48, 51, 55),
+    "Cmaj7": (48, 52, 55, 59),   "Cm7":   (48, 51, 55, 58),
+    "D":     (50, 54, 57),       "Dm":    (50, 53, 57),
+    "Dmaj7": (50, 54, 57, 61),   "Dm7":   (50, 53, 57, 60),
+    "E":     (52, 56, 59),       "Em":    (52, 55, 59),
+    "Emaj7": (52, 56, 59, 63),   "Em7":   (52, 55, 59, 62),
+    "F":     (53, 57, 60),       "Fm":    (53, 56, 60),
+    "Fmaj7": (53, 57, 60, 64),   "Fm7":   (53, 56, 60, 63),
+    "G":     (55, 59, 62),       "Gm":    (55, 58, 62),
+    "Gmaj7": (55, 59, 62, 66),   "Gm7":   (55, 58, 62, 65),
+    "A":     (57, 61, 64),       "Am":    (57, 60, 64),
+    "Amaj7": (57, 61, 64, 68),   "Am7":   (57, 60, 64, 67),
+    "B":     (59, 63, 66),       "Bm":    (59, 62, 66),
+    "Bmaj7": (59, 63, 66, 70),   "Bm7":   (59, 62, 66, 69),
+}
+
+# Rootless voicings (3rd + 7th, used when bassist covers the root)
+ROOTLESS_VOICINGS: dict[str, tuple[int, ...]] = {
+    "C":     (52, 55),           "Cm":    (51, 55),
+    "Cmaj7": (52, 59),           "Cm7":   (51, 58),
+    "D":     (54, 57),           "Dm":    (53, 57),
+    "Dmaj7": (54, 61),           "Dm7":   (53, 60),
+    "E":     (56, 59),           "Em":    (55, 59),
+    "F":     (57, 60),           "Fm":    (56, 60),
+    "Fmaj7": (57, 64),           "Fm7":   (56, 63),
+    "G":     (59, 62),           "Gm":    (58, 62),
+    "Gmaj7": (59, 66),           "Gm7":   (58, 65),
+    "A":     (61, 64),           "Am":    (60, 64),
+    "Amaj7": (61, 68),           "Am7":   (60, 67),
+    "B":     (63, 66),           "Bm":    (62, 66),
+    "Bmaj7": (63, 70),           "Bm7":   (62, 69),
 }
 
 # Section strategies for piano
 PIANO_STRATEGIES: dict[str, dict] = {
-    "intro": {"comp_beats": (0,), "voicing_style": "sparse", "vel_offset": -20},
-    "verse": {"comp_beats": (0, 2), "voicing_style": "arpeggio", "vel_offset": -10},
-    "chorus": {"comp_beats": (0, 1, 2, 3), "voicing_style": "full", "vel_offset": 0},
-    "bridge": {"comp_beats": (0, 3), "voicing_style": "sparse", "vel_offset": -15},
-    "outro": {"comp_beats": (0,), "voicing_style": "sparse", "vel_offset": -25},
+    "intro":  {"comp_beats": (0,), "voicing_style": "sparse", "vel_offset": -20, "rootless": False},
+    "verse":  {"comp_beats": (0, 2), "voicing_style": "arpeggio", "vel_offset": -10, "rootless": True},
+    "chorus": {"comp_beats": (0, 1, 2, 3), "voicing_style": "full", "vel_offset": 0, "rootless": False},
+    "bridge": {"comp_beats": (0, 3), "voicing_style": "rootless", "vel_offset": -15, "rootless": True},
+    "outro":  {"comp_beats": (0,), "voicing_style": "sparse", "vel_offset": -25, "rootless": False},
 }
 
 
 class Pianist(MusicianAgent):
-    """Comps chords and reacts to the rhythm section."""
+    """Comps chords with extended voicings, rootless options, and rhythmic variation."""
 
     def __init__(self, bus: EventBus, name: str = "Pianist", band_state: BandState | None = None) -> None:
         super().__init__(name, bus, band_state)
         self._voicing: tuple[int, ...] = (48, 52, 55)
+        self._rootless_voicing: tuple[int, ...] = (52, 55)
         self._vocalist_singing: bool = False
+        self._current_chord: str = "C"
 
     async def react(self, event: MusicalEvent) -> None:
         if event.event_type == EventType.CHORD_CHANGE and event.chord:
+            self._current_chord = event.chord
             self._voicing = CHORD_VOICINGS.get(event.chord, self._voicing)
+            self._rootless_voicing = ROOTLESS_VOICINGS.get(event.chord, self._voicing[:2])
         # Track vocalist activity to stay out of the way
         if event.source == "Vocalist":
             if event.event_type == EventType.NOTE_ON:
@@ -298,12 +397,21 @@ class Pianist(MusicianAgent):
         beat_in_bar = tick % 4
         strat = PIANO_STRATEGIES.get(self.state.current_section, PIANO_STRATEGIES["verse"])
 
+        # Syncopation: occasionally play slightly ahead (anticipation)
         should_play = beat_in_bar in strat["comp_beats"]
         if not should_play:
-            return events
+            # Anticipation: 15% chance to play one beat early in chorus
+            if self.state.current_section == "chorus" and beat_in_bar == 3 and random.random() < 0.15:
+                should_play = True
+            else:
+                return events
 
-        voicing = self._voicing
+        # Select voicing based on style
         style = strat["voicing_style"]
+        if style == "rootless" or strat.get("rootless"):
+            voicing = self._rootless_voicing
+        else:
+            voicing = self._voicing
 
         # Sparse: only bottom two notes
         if style == "sparse":
@@ -320,6 +428,9 @@ class Pianist(MusicianAgent):
                 voicing = self._voicing[:2]
 
         vel = max(40, min(127, self.state.intensity + strat["vel_offset"]))
+        vel = swing_velocity(tick, vel, swing_amount=8)
+        vel = humanize_velocity(vel, amount=5)
+
         for pitch in voicing:
             events.append(self._make_event(
                 tick=tick, event_type=EventType.NOTE_ON,
@@ -333,26 +444,30 @@ class Pianist(MusicianAgent):
 
 # ── Vocalist / Melodic lead ────────────────────────────────────────────
 
-# Pentatonic fragments relative to chord root for simple melodic ideas
+# Extended scale: pentatonic + blue note + chromatic passing tones
 PENTATONIC_INTERVALS = [0, 2, 4, 7, 9, 12]
+BLUES_INTERVALS = [0, 3, 5, 6, 7, 10, 12]  # blues scale
 
 # Section strategies for vocalist
 VOCAL_STRATEGIES: dict[str, dict] = {
-    "intro": {"rest_prob": 0.7, "duration_choices": (2, 3), "active": False},
-    "verse": {"rest_prob": 0.25, "duration_choices": (1, 2), "active": True},
-    "chorus": {"rest_prob": 0.15, "duration_choices": (1, 1, 2), "active": True},
-    "bridge": {"rest_prob": 0.4, "duration_choices": (2, 3), "active": True},
-    "outro": {"rest_prob": 0.5, "duration_choices": (2, 3, 4), "active": True},
+    "intro":  {"rest_prob": 0.7, "duration_choices": (2, 3), "active": False, "scale": "pentatonic"},
+    "verse":  {"rest_prob": 0.25, "duration_choices": (1, 2), "active": True, "scale": "pentatonic"},
+    "chorus": {"rest_prob": 0.15, "duration_choices": (1, 1, 2), "active": True, "scale": "pentatonic"},
+    "bridge": {"rest_prob": 0.4, "duration_choices": (2, 3), "active": True, "scale": "blues"},
+    "outro":  {"rest_prob": 0.5, "duration_choices": (2, 3, 4), "active": True, "scale": "pentatonic"},
 }
 
 
 class Vocalist(MusicianAgent):
-    """Sings melodic lines over the harmony, leaving space dynamically."""
+    """Sings melodic lines with phrase contour, blues scale in bridges, and dynamic breathing."""
 
     def __init__(self, bus: EventBus, name: str = "Vocalist", band_state: BandState | None = None) -> None:
         super().__init__(name, bus, band_state)
         self._root: int = 60  # C4
         self._phrase_rest_counter: int = 0  # ticks of silence remaining
+        self._last_pitch: int | None = None  # for melodic contour
+        self._phrase_direction: int = 1  # 1=ascending, -1=descending
+        self._notes_in_phrase: int = 0
 
     async def react(self, event: MusicalEvent) -> None:
         if event.event_type == EventType.CHORD_CHANGE and event.chord:
@@ -383,17 +498,54 @@ class Vocalist(MusicianAgent):
         if random.random() < strat["rest_prob"]:
             if random.random() < 0.3:
                 self._phrase_rest_counter = random.randint(1, 3)
+                # Reset phrase on longer rests
+                self._notes_in_phrase = 0
+                self._phrase_direction = random.choice([1, -1])
             await self.emit(self._make_event(tick=tick, event_type=EventType.REST))
             return events
 
-        interval = random.choice(PENTATONIC_INTERVALS)
+        # Select scale based on section
+        scale = BLUES_INTERVALS if strat.get("scale") == "blues" else PENTATONIC_INTERVALS
+
+        # Melodic contour: prefer stepwise motion within phrases
+        if self._last_pitch is not None and self._notes_in_phrase > 0:
+            # Try to move by step in the current phrase direction
+            last_interval = self._last_pitch - self._root
+            current_idx = min(range(len(scale)), key=lambda i: abs(scale[i] - last_interval))
+            next_idx = current_idx + self._phrase_direction
+
+            if 0 <= next_idx < len(scale):
+                interval = scale[next_idx]
+            else:
+                # Reverse direction at scale boundaries
+                self._phrase_direction *= -1
+                next_idx = current_idx + self._phrase_direction
+                next_idx = max(0, min(len(scale) - 1, next_idx))
+                interval = scale[next_idx]
+
+            # Occasional leap (20% chance) for melodic interest
+            if random.random() < 0.2:
+                interval = random.choice(scale)
+        else:
+            interval = random.choice(scale)
+
         pitch = self._root + interval
+        self._last_pitch = pitch
+        self._notes_in_phrase += 1
+
+        # End phrase after 3-5 notes
+        if self._notes_in_phrase >= random.randint(3, 5):
+            self._phrase_rest_counter = random.randint(1, 2)
+
+        # Crescendo within phrases
+        phrase_vel = self.state.intensity + (self._notes_in_phrase * 3)
+        vel = min(127, humanize_velocity(phrase_vel, amount=5))
 
         events.append(self._make_event(
             tick=tick,
             event_type=EventType.NOTE_ON,
             pitch=pitch,
-            velocity=self.state.intensity,
+            velocity=vel,
             duration=random.choice(strat["duration_choices"]),
         ))
 

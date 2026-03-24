@@ -118,9 +118,17 @@ class BandOrchestrator:
             for event in self.song.events_at(tick):
                 await self.bus.publish(event)
 
-            # 2. Let every agent play this tick concurrently.
-            coros = [agent.play_tick(tick) for agent in self.agents.values()]
+            # 2. Let every agent play this tick concurrently, with error isolation.
+            coros = [self._safe_play(agent, tick) for agent in self.agents.values()]
             await asyncio.gather(*coros)
 
         logger.info("Performance complete — %d events produced", len(self.bus.history))
         return self.bus.history
+
+    async def _safe_play(self, agent: MusicianAgent, tick: int) -> list[MusicalEvent]:
+        """Call agent.play_tick with error isolation — one agent crash doesn't stop the band."""
+        try:
+            return await agent.play_tick(tick)
+        except Exception as exc:
+            logger.error("Agent %s failed at tick %d: %s", agent.name, tick, exc)
+            return []
